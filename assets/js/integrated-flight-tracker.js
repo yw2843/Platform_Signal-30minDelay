@@ -38,8 +38,8 @@
 
   var state = {
     batch: null,
-    nextBatch: null,
-    playIndex: 0,
+    previousBatch: null,
+    displayedSnapshotAt: null,
     flights: [],
     selectedIcao24: null,
     statusVisibility: { confirmed: true, probable: true, noCurrent: true },
@@ -506,30 +506,71 @@
 
   // GitHub Pages cannot run the live Python tracker, so instead of polling a
   // "/api/flights" API every few seconds, the frontend fetches a batch of
-  // pre-recorded snapshots (produced every ~5 minutes by a GitHub Actions
-  // workflow, each snapshot spaced 30 seconds apart -- see
-  // Flight_Data/realtime-flight-tracker/snapshot_batch.py) and replays them
-  // client-side on the same 30-second cadence PollingService always used, so
-  // the map still looks like a live 30s feed. It's just running a few minutes
-  // behind real time -- the "OpenSky update" clock in the status bar and the
-  // tooltip below make that delay visible rather than hiding it.
+  // pre-recorded snapshots. GitHub's own schedule trigger does not reliably
+  // fire every few minutes (observed delays of 20+ minutes), so a GitHub
+  // Actions workflow instead asks for a run every 25 minutes, and each run
+  // records a full 30-minute window of snapshots 30 seconds apart -- see
+  // Flight_Data/realtime-flight-tracker/snapshot_batch.py. The frontend
+  // always displays what happened DISPLAY_LAG_SECONDS ago and ticks forward
+  // with the wall clock (not a frame counter), so as long as a fresh
+  // 30-minute batch lands within any 30-minute gap between runs, playback
+  // never runs dry the way a fixed "start of this batch" index did.
   var BATCH_URL = "data/flights-timeline.json";
+  var DISPLAY_LAG_SECONDS = 30 * 60;
+  // How much further behind DISPLAY_LAG_SECONDS the newest available data is
+  // allowed to be before the status bar flags the feed as stalled, rather
+  // than silently holding the last known snapshot forever.
+  var STALE_GRACE_SECONDS = 15 * 60;
+
+  function mergedSnapshots() {
+    var combined = [];
+    if (state.previousBatch) combined = combined.concat(state.previousBatch.snapshots || []);
+    if (state.batch) combined = combined.concat(state.batch.snapshots || []);
+    combined.sort(function (a, b) { return Number(a.generated_at) - Number(b.generated_at); });
+    return combined;
+  }
 
   function currentSnapshot() {
-    if (!state.batch || !state.batch.snapshots || !state.batch.snapshots.length) return null;
-    var index = Math.min(state.playIndex, state.batch.snapshots.length - 1);
-    return state.batch.snapshots[index];
+    var combined = mergedSnapshots();
+    if (!combined.length) return null;
+    var targetTime = Date.now() / 1000 - DISPLAY_LAG_SECONDS;
+    var selected = null;
+    combined.some(function (snapshot) {
+      if (Number(snapshot.generated_at) > targetTime) return true;
+      selected = snapshot;
+      return false;
+    });
+    // Before the site has accumulated a full 30 minutes of history (e.g. right
+    // after a first-ever page load), show the oldest snapshot we do have and
+    // let the wall clock catch up to it rather than showing nothing.
+    return selected || combined[0];
+  }
+
+  function pipelineIsStale() {
+    var combined = mergedSnapshots();
+    if (!combined.length) return true;
+    var newest = combined[combined.length - 1];
+    return (Date.now() / 1000 - Number(newest.generated_at)) > (DISPLAY_LAG_SECONDS + STALE_GRACE_SECONDS);
   }
 
   function applyCurrentSnapshot() {
     var snapshot = currentSnapshot();
-    if (!snapshot) return;
-    state.flights = snapshot.flights || [];
-    advanceSignalClock();
-    renderStatus(snapshot);
-    renderFlightButtons();
-    updateFlightLayers();
-    refreshSelectedFlight();
+    if (!snapshot) {
+      setConnection("waiting", "Waiting for the first snapshot batch");
+      return;
+    }
+    if (snapshot.generated_at !== state.displayedSnapshotAt) {
+      state.displayedSnapshotAt = snapshot.generated_at;
+      state.flights = snapshot.flights || [];
+      advanceSignalClock();
+      renderStatus(snapshot);
+      renderFlightButtons();
+      updateFlightLayers();
+      refreshSelectedFlight();
+    }
+    if (pipelineIsStale()) {
+      setConnection("waiting", "Waiting for update");
+    }
   }
 
   async function fetchBatch() {
@@ -538,38 +579,22 @@
       if (!response.ok) throw new Error("Snapshot batch returned HTTP " + response.status);
       var payload = await response.json();
       if (!payload || !Array.isArray(payload.snapshots) || !payload.snapshots.length) return;
-      if (!state.batch) {
+      if (!state.batch || payload.batch_generated_at > state.batch.batch_generated_at) {
+        state.previousBatch = state.batch;
         state.batch = payload;
-        state.playIndex = 0;
-        applyCurrentSnapshot();
-      } else if (payload.batch_generated_at > state.batch.batch_generated_at) {
-        state.nextBatch = payload;
       }
+      applyCurrentSnapshot();
     } catch (error) {
       setConnection("error", "Snapshot feed unavailable");
       showMessage(error.message || String(error));
     }
   }
 
-  function advancePlayhead() {
-    if (!state.batch) return;
-    var snapshots = state.batch.snapshots;
-    if (state.playIndex < snapshots.length - 1) {
-      state.playIndex += 1;
-    } else if (state.nextBatch) {
-      state.batch = state.nextBatch;
-      state.nextBatch = null;
-      state.playIndex = 0;
-    } else {
-      setConnection("waiting", "Waiting for update");
-      return;
-    }
-    applyCurrentSnapshot();
-  }
-
   function getSignalHistory(icao24, since) {
-    var histories = (state.batch && state.batch.signal_histories) || {};
-    var cached = histories[String(icao24 || "").toLowerCase()];
+    var key = String(icao24 || "").toLowerCase();
+    var cached =
+      (state.batch && state.batch.signal_histories && state.batch.signal_histories[key]) ||
+      (state.previousBatch && state.previousBatch.signal_histories && state.previousBatch.signal_histories[key]);
     if (!cached) return null;
     return {
       version: cached.version,
@@ -642,12 +667,14 @@
     }).length;
     ui.lastUpdate.textContent = payload.source_time ? formatClock(payload.source_time * 1000) : "--";
     ui.loadingCard.classList.toggle("hidden", Boolean(payload.source_time));
-    var batchAgeMinutes = state.batch ? Math.round((Date.now() / 1000 - state.batch.batch_generated_at) / 60) : null;
+    var displayedAgeMinutes = payload.generated_at != null
+      ? Math.round((Date.now() / 1000 - payload.generated_at) / 60)
+      : null;
     ui.connection.title = [
       service.message,
       service.remaining_credits != null ? service.remaining_credits + " state credits remaining" : "",
-      "Replayed from a GitHub Actions snapshot batch at 30s intervals" +
-        (batchAgeMinutes != null ? " (batch is ~" + batchAgeMinutes + " min old)" : "")
+      "Replayed from a GitHub Actions snapshot batch, refreshed roughly every 25 min" +
+        (displayedAgeMinutes != null ? " (showing data ~" + displayedAgeMinutes + " min behind live)" : "")
     ].filter(Boolean).join(" - ");
   }
 
@@ -1663,7 +1690,13 @@
   };
 
   fetchBatch();
-  window.setInterval(fetchBatch, 45000);
-  window.setInterval(advancePlayhead, 30000);
+  // New batches only land roughly every 25-30 minutes now, so there's no need
+  // to poll for one as aggressively as the old 5-minute-cadence design did.
+  window.setInterval(fetchBatch, 150000);
+  // Recompute which already-fetched snapshot corresponds to "30 minutes ago"
+  // every 30s -- the display advances with the wall clock, not this timer,
+  // so a throttled/backgrounded tab just catches up on its next tick instead
+  // of drifting.
+  window.setInterval(applyCurrentSnapshot, 30000);
   window.setInterval(advanceSignalClock, 1000);
 })();

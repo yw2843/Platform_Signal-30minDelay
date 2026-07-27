@@ -8,18 +8,28 @@
 "persistent Python service" options below have been superseded by a third
 approach implemented directly in this repo: a scheduled GitHub Actions
 workflow (`.github/workflows/flight-snapshot.yml`) runs the existing Python
-tracker (`Flight_Data/realtime-flight-tracker/snapshot_batch.py`) every ~5
-minutes, takes 10 snapshots 30 seconds apart (the same cadence
-`PollingService` always used), and publishes them as one static
-`data/flights-timeline.json` file. The static frontend
-(`assets/js/integrated-flight-tracker.js`) replays those snapshots at a 30s
-cadence, so the site still looks like a live 30s feed while GitHub Pages
-serves nothing but static files and no external host is required. This keeps
-OpenSky polling centralized to one Actions job every 5 minutes rather than
-every 30 seconds, further reducing API/credential usage versus the original
-architecture. See that workflow and script for the current implementation;
-the remaining sections here describe the alternatives that were considered
-and are kept for historical context.
+tracker (`Flight_Data/realtime-flight-tracker/snapshot_batch.py`), which
+polls OpenSky every 30 seconds (the same cadence `PollingService` always
+used) and publishes the results as one static `data/flights-timeline.json`
+file. GitHub Pages serves nothing but static files and no external host is
+required.
+
+**Update (2026-07-27, revised):** GitHub's `schedule` cron trigger does not
+reliably fire at short intervals in practice (observed delays of 20+ minutes
+against a requested 5-minute schedule on this repo), so the design was
+revised to work with that limitation instead of fighting it: the workflow now
+requests a run every 25 minutes, and each run collects a full 30-minute
+window of snapshots (60, 30 seconds apart) instead of 5 minutes' worth. The
+frontend always displays what happened 30 minutes ago and advances with the
+wall clock (rather than starting over at the beginning of whatever batch just
+loaded), so as long as a fresh batch lands within any 30-minute gap between
+runs, playback never runs dry. This roughly triples-to-quintuples OpenSky
+credit usage versus the original 5-minute design (an estimated ~1,500-2,700
+credits/day versus ~500-600/day, against OpenSky's 4,000/day authenticated
+allowance) — still expected to stay within the free allowance, but with much
+less daily headroom. See that workflow and script for the current
+implementation; the remaining sections here describe the alternatives that
+were considered and are kept for historical context.
 
 ## Executive Summary
 

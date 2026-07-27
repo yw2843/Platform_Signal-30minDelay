@@ -7,9 +7,12 @@ live local server, but instead of answering HTTP requests forever, it takes a
 fixed number of tracker.snapshot() readings spaced by the same 30-second
 cadence as PollingService, then writes them all to one JSON file and exits.
 
-The frontend replays those snapshots client-side at the same 30-second
-cadence, so the site still looks like a live 30s feed even though the whole
-batch is published only once every few minutes.
+GitHub's own `schedule` cron trigger does not reliably fire every few
+minutes (observed delays of 20+ minutes on this repo), so the workflow asks
+for a run every 25 minutes but each run collects a full 30-minute window of
+snapshots. The frontend always displays what happened 30 minutes ago and
+ticks forward with the wall clock, so as long as a fresh 30-minute batch
+lands within any 30-minute gap between runs, playback never runs dry.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ FLIGHT_DATA_DIR = APP_DIR.parent
 PROJECT_ROOT = FLIGHT_DATA_DIR.parent
 DEFAULT_CREDENTIALS = FLIGHT_DATA_DIR / "credentials.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "flights-timeline.json"
-DEFAULT_SNAPSHOT_COUNT = 10
+DEFAULT_SNAPSHOT_COUNT = 60
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--count",
         type=int,
         default=DEFAULT_SNAPSHOT_COUNT,
-        help="Number of snapshots to record (default: 10, i.e. ~5 minutes at the default 30s interval)",
+        help="Number of snapshots to record (default: 60, i.e. ~30 minutes at the default 30s interval)",
     )
     parser.add_argument(
         "--interval",
