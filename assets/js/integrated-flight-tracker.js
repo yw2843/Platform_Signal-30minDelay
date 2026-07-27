@@ -37,6 +37,9 @@
   };
 
   var state = {
+    batch: null,
+    nextBatch: null,
+    playIndex: 0,
     flights: [],
     selectedIcao24: null,
     statusVisibility: { confirmed: true, probable: true, noCurrent: true },
@@ -446,7 +449,7 @@
       new deck.ScenegraphLayer({
         id: prefix + "dc8-aircraft-models",
         data: activeFlights,
-        scenegraph: "/assets/plane.glb",
+        scenegraph: "Flight_Data/DC8_AFRC_AIR_0824.glb",
         getPosition: flightPosition,
         getOrientation: function (flight) { return [0, flightHeading(flight), 90]; },
         getColor: function (flight) {
@@ -501,22 +504,85 @@
       formatNumber(flight.current.distance_nm, 1, " NM");
   }
 
-  async function refreshFlights() {
+  // GitHub Pages cannot run the live Python tracker, so instead of polling a
+  // "/api/flights" API every few seconds, the frontend fetches a batch of
+  // pre-recorded snapshots (produced every ~5 minutes by a GitHub Actions
+  // workflow, each snapshot spaced 30 seconds apart -- see
+  // Flight_Data/realtime-flight-tracker/snapshot_batch.py) and replays them
+  // client-side on the same 30-second cadence PollingService always used, so
+  // the map still looks like a live 30s feed. It's just running a few minutes
+  // behind real time -- the "OpenSky update" clock in the status bar and the
+  // tooltip below make that delay visible rather than hiding it.
+  var BATCH_URL = "data/flights-timeline.json";
+
+  function currentSnapshot() {
+    if (!state.batch || !state.batch.snapshots || !state.batch.snapshots.length) return null;
+    var index = Math.min(state.playIndex, state.batch.snapshots.length - 1);
+    return state.batch.snapshots[index];
+  }
+
+  function applyCurrentSnapshot() {
+    var snapshot = currentSnapshot();
+    if (!snapshot) return;
+    state.flights = snapshot.flights || [];
+    advanceSignalClock();
+    renderStatus(snapshot);
+    renderFlightButtons();
+    updateFlightLayers();
+    refreshSelectedFlight();
+  }
+
+  async function fetchBatch() {
     try {
-      var response = await fetch("/api/flights", { cache: "no-store" });
-      if (!response.ok) throw new Error("Tracker API returned HTTP " + response.status);
+      var response = await fetch(BATCH_URL + "?t=" + Date.now(), { cache: "no-store" });
+      if (!response.ok) throw new Error("Snapshot batch returned HTTP " + response.status);
       var payload = await response.json();
-      state.flights = payload.flights || [];
-      advanceSignalClock();
-      renderStatus(payload);
-      renderFlightButtons();
-      updateFlightLayers();
-      refreshSelectedFlight();
+      if (!payload || !Array.isArray(payload.snapshots) || !payload.snapshots.length) return;
+      if (!state.batch) {
+        state.batch = payload;
+        state.playIndex = 0;
+        applyCurrentSnapshot();
+      } else if (payload.batch_generated_at > state.batch.batch_generated_at) {
+        state.nextBatch = payload;
+      }
     } catch (error) {
-      setConnection("error", "Local API error");
+      setConnection("error", "Snapshot feed unavailable");
       showMessage(error.message || String(error));
     }
   }
+
+  function advancePlayhead() {
+    if (!state.batch) return;
+    var snapshots = state.batch.snapshots;
+    if (state.playIndex < snapshots.length - 1) {
+      state.playIndex += 1;
+    } else if (state.nextBatch) {
+      state.batch = state.nextBatch;
+      state.nextBatch = null;
+      state.playIndex = 0;
+    } else {
+      setConnection("waiting", "Waiting for update");
+      return;
+    }
+    applyCurrentSnapshot();
+  }
+
+  function getSignalHistory(icao24, since) {
+    var histories = (state.batch && state.batch.signal_histories) || {};
+    var cached = histories[String(icao24 || "").toLowerCase()];
+    if (!cached) return null;
+    return {
+      version: cached.version,
+      icao24: cached.icao24,
+      since: since,
+      finalized_through: cached.finalized_through,
+      points: (cached.points || []).filter(function (point) {
+        return since == null || Number(point.timestamp) > Number(since);
+      })
+    };
+  }
+
+  window.PlatformSignalBatch = { getSignalHistory: getSignalHistory };
 
   function selectSignalPoint(flight, nowSeconds) {
     var signal = flight.signal_v2;
@@ -576,9 +642,12 @@
     }).length;
     ui.lastUpdate.textContent = payload.source_time ? formatClock(payload.source_time * 1000) : "--";
     ui.loadingCard.classList.toggle("hidden", Boolean(payload.source_time));
+    var batchAgeMinutes = state.batch ? Math.round((Date.now() / 1000 - state.batch.batch_generated_at) / 60) : null;
     ui.connection.title = [
       service.message,
-      service.remaining_credits != null ? service.remaining_credits + " state credits remaining" : ""
+      service.remaining_credits != null ? service.remaining_credits + " state credits remaining" : "",
+      "Replayed from a GitHub Actions snapshot batch at 30s intervals" +
+        (batchAgeMinutes != null ? " (batch is ~" + batchAgeMinutes + " min old)" : "")
     ].filter(Boolean).join(" - ");
   }
 
@@ -821,13 +890,11 @@
     if (since == null) {
       since = (state.selectedSignalWindowEnd || Date.now() / 1000) - SIGNAL_ROUTE_WINDOW_SECONDS - 2;
     }
-    var url = "/api/signal-v2?icao24=" + encodeURIComponent(icao24) +
-      "&since=" + encodeURIComponent(since);
     state.selectedSignalLoadingIcao24 = icao24;
-    fetch(url, { cache: "no-store" })
-      .then(function (response) {
-        if (!response.ok) throw new Error("Signal history returned HTTP " + response.status);
-        return response.json();
+    Promise.resolve(getSignalHistory(icao24, since))
+      .then(function (payload) {
+        if (!payload) throw new Error("Signal history unavailable for " + icao24);
+        return payload;
       })
       .then(function (payload) {
         if (String(state.selectedIcao24 || "").toLowerCase() !== icao24 ||
@@ -1595,7 +1662,8 @@
     }
   };
 
-  refreshFlights();
-  window.setInterval(refreshFlights, 5000);
+  fetchBatch();
+  window.setInterval(fetchBatch, 45000);
+  window.setInterval(advancePlayhead, 30000);
   window.setInterval(advanceSignalClock, 1000);
 })();

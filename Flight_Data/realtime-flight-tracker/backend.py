@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import csv
+import os
 import threading
 import time
 from collections import deque
@@ -604,6 +605,17 @@ class OpenSkyClient:
 
     @staticmethod
     def _load_credentials(path: Path) -> tuple[str, str]:
+        """Load OpenSky credentials from a local file, falling back to
+        OPENSKY_CLIENT_ID/OPENSKY_CLIENT_SECRET environment variables (used by
+        the GitHub Actions snapshot workflow, which stores them as secrets
+        instead of a checked-out credentials.json)."""
+        if not path.is_file():
+            env_client_id = os.environ.get("OPENSKY_CLIENT_ID")
+            env_client_secret = os.environ.get("OPENSKY_CLIENT_SECRET")
+            if env_client_id and env_client_secret:
+                return env_client_id, env_client_secret
+            raise OpenSkyError(f"Credentials file not found: {path}")
+
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError as exc:

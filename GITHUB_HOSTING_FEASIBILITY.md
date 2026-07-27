@@ -4,6 +4,23 @@
 **Review date:** July 25, 2026  
 **Status:** Feasibility review only. No website, server, data, or deployment configuration was changed.
 
+**Update (2026-07-27):** This review's "GitHub Pages plus a backend" and
+"persistent Python service" options below have been superseded by a third
+approach implemented directly in this repo: a scheduled GitHub Actions
+workflow (`.github/workflows/flight-snapshot.yml`) runs the existing Python
+tracker (`Flight_Data/realtime-flight-tracker/snapshot_batch.py`) every ~5
+minutes, takes 10 snapshots 30 seconds apart (the same cadence
+`PollingService` always used), and publishes them as one static
+`data/flights-timeline.json` file. The static frontend
+(`assets/js/integrated-flight-tracker.js`) replays those snapshots at a 30s
+cadence, so the site still looks like a live 30s feed while GitHub Pages
+serves nothing but static files and no external host is required. This keeps
+OpenSky polling centralized to one Actions job every 5 minutes rather than
+every 30 seconds, further reducing API/credential usage versus the original
+architecture. See that workflow and script for the current implementation;
+the remaining sections here describe the alternatives that were considered
+and are kept for historical context.
+
 ## Executive Summary
 
 The complete Platform Signal website cannot be hosted by **GitHub Pages alone** without losing its live flight and signal functions. GitHub Pages serves static files but cannot run the project's Python backend.

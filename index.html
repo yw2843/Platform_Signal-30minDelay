@@ -638,7 +638,7 @@
         <span id="section-audio-signal">Waiting for route signal</span>
         <span id="section-audio-status-note">Raw steps: no smoothing, crossfade, or interpolation</span>
       </div>
-      <audio id="section-audio" preload="metadata" src="/media/section-music.wav?format=pcm16-clip-53-153-v1"></audio>
+      <audio id="section-audio" preload="metadata" src="music/section-music-browser-pcm16-clip-53-153.wav?format=pcm16-clip-53-153-v1"></audio>
     </section>
   </div>
 
@@ -1463,15 +1463,13 @@
     var icao24 = String(activeSectionFlight.icao24).toLowerCase();
     if (activeSectionSignalLoadingIcao24 === icao24) return;
     var selectionVersion = activeSectionSignalSelectionVersion;
-    var url = "/api/signal-v2?icao24=" + encodeURIComponent(icao24);
-    if (activeSectionSignalSince != null) {
-      url += "&since=" + encodeURIComponent(activeSectionSignalSince);
-    }
     activeSectionSignalLoadingIcao24 = icao24;
-    fetch(url, { cache: "no-store" })
-      .then(function (response) {
-        if (!response.ok) throw new Error("Signal history returned HTTP " + response.status);
-        return response.json();
+    Promise.resolve(
+      window.PlatformSignalBatch && window.PlatformSignalBatch.getSignalHistory(icao24, activeSectionSignalSince)
+    )
+      .then(function (payload) {
+        if (!payload) throw new Error("Signal history unavailable for " + icao24);
+        return payload;
       })
       .then(function (payload) {
         if (!activeSectionFlight || String(activeSectionFlight.icao24).toLowerCase() !== icao24 ||
