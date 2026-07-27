@@ -40,6 +40,7 @@
     batch: null,
     previousBatch: null,
     displayedSnapshotAt: null,
+    flightTrails: {},
     flights: [],
     selectedIcao24: null,
     statusVisibility: { confirmed: true, probable: true, noCurrent: true },
@@ -553,6 +554,45 @@
     return (Date.now() / 1000 - Number(newest.generated_at)) > (DISPLAY_LAG_SECONDS + STALE_GRACE_SECONDS);
   }
 
+  // Generous, since this now only costs browser memory, not network transfer.
+  var FLIGHT_TRAIL_MAX_POINTS = 120;
+
+  // The published batch no longer ships each flight's full accumulated
+  // `track` (that duplicated across every stored snapshot and was the cause
+  // of a 225MB batch file -- see snapshot_batch.py's _strip_track). Instead,
+  // rebuild the same track shape client-side from each displayed tick's
+  // `current` point and attach it back onto the flight object, so both the
+  // map's trail layer (makeFlightLayers/flightPath) and index.html's Section
+  // altitude-profile view (which also reads flight.track) keep working
+  // unchanged. It starts empty on a fresh page load and builds up over the
+  // first few 30-minute-lag ticks rather than arriving pre-built.
+  function updateFlightTrails(flights) {
+    var seen = {};
+    flights.forEach(function (flight) {
+      var current = flight.current;
+      if (!current || finiteNumber(current.longitude) == null || finiteNumber(current.latitude) == null) return;
+      seen[flight.icao24] = true;
+      var trail = state.flightTrails[flight.icao24] || (state.flightTrails[flight.icao24] = []);
+      var last = trail[trail.length - 1];
+      if (!last || Number(last.timestamp) !== Number(current.timestamp)) {
+        trail.push({
+          timestamp: current.timestamp,
+          longitude: current.longitude,
+          latitude: current.latitude,
+          altitude_m: current.altitude_m || 0,
+          altitude_ft: current.altitude_ft || 0,
+          distance_nm: current.distance_nm,
+          phase_scope: current.phase_scope
+        });
+        if (trail.length > FLIGHT_TRAIL_MAX_POINTS) trail.shift();
+      }
+      flight.track = trail;
+    });
+    Object.keys(state.flightTrails).forEach(function (icao24) {
+      if (!seen[icao24]) delete state.flightTrails[icao24];
+    });
+  }
+
   function applyCurrentSnapshot() {
     var snapshot = currentSnapshot();
     if (!snapshot) {
@@ -561,6 +601,7 @@
     }
     if (snapshot.generated_at !== state.displayedSnapshotAt) {
       state.displayedSnapshotAt = snapshot.generated_at;
+      updateFlightTrails(snapshot.flights || []);
       state.flights = snapshot.flights || [];
       advanceSignalClock();
       renderStatus(snapshot);
