@@ -517,11 +517,34 @@
   // 30-minute batch lands within any 30-minute gap between runs, playback
   // never runs dry the way a fixed "start of this batch" index did.
   var BATCH_URL = "data/flights-timeline.json";
-  var DISPLAY_LAG_SECONDS = 30 * 60;
+
+  // Dev-facing switch, not a public setting: true while the data source is
+  // the 30-minute-lagged GitHub Actions snapshot batch (the current public
+  // deployment -- see snapshot_batch.py). Flip to false if this is ever
+  // pointed at a genuinely live/near-real-time feed instead (e.g. a direct
+  // API), and DISPLAY_LAG_SECONDS collapses to 0 so every "what time is it,
+  // for display purposes" calculation below falls back to true wall-clock
+  // time automatically -- nothing else in this file needs to change.
+  var USING_DELAYED_SNAPSHOT_SOURCE = true;
+  var DISPLAY_LAG_SECONDS = USING_DELAYED_SNAPSHOT_SOURCE ? 30 * 60 : 0;
+
   // How much further behind DISPLAY_LAG_SECONDS the newest available data is
   // allowed to be before the status bar flags the feed as stalled, rather
   // than silently holding the last known snapshot forever.
   var STALE_GRACE_SECONDS = 15 * 60;
+
+  // The single "what moment in time should the UI act like it currently is"
+  // clock. Everything that decides *what to display* (which snapshot, which
+  // predicted-timeline point, default history windows) should read this
+  // instead of raw Date.now() -- that's what keeps sub-tick interpolation
+  // (advanceSignalClock/selectSignalPoint below) walking toward the next
+  // real data point instead of comparing lagged data against unlagged time
+  // and freezing. Things that measure genuine elapsed/real time (staleness
+  // checks, cache-busting, "data is N minutes old" labels) intentionally
+  // keep using Date.now() directly and are not affected by this switch.
+  function displayNowSeconds() {
+    return Date.now() / 1000 - DISPLAY_LAG_SECONDS;
+  }
 
   function mergedSnapshots() {
     var combined = [];
@@ -534,7 +557,7 @@
   function currentSnapshot() {
     var combined = mergedSnapshots();
     if (!combined.length) return null;
-    var targetTime = Date.now() / 1000 - DISPLAY_LAG_SECONDS;
+    var targetTime = displayNowSeconds();
     var selected = null;
     combined.some(function (snapshot) {
       if (Number(snapshot.generated_at) > targetTime) return true;
@@ -663,7 +686,18 @@
   }
 
   function advanceSignalClock() {
-    var nowSeconds = Date.now() / 1000;
+    // Bug fix: this used to read raw Date.now()/1000 here. selectSignalPoint
+    // walks each flight's predicted_timeline (points predicted forward from
+    // that snapshot's own, possibly lagged, timestamp) looking for the
+    // latest one not yet in the future. Comparing that against unlagged
+    // wall-clock time meant every predicted point was always "already past"
+    // once DISPLAY_LAG_SECONDS was introduced, so live_current jumped once
+    // to the final predicted point and froze there for the rest of the tick
+    // instead of animating through it. displayNowSeconds() is the same
+    // lag-adjusted clock currentSnapshot() uses to pick which snapshot to
+    // show, so this now walks toward the next real data point correctly --
+    // and needs no change at all when DISPLAY_LAG_SECONDS is 0.
+    var nowSeconds = displayNowSeconds();
     var ticks = [];
     state.flights.forEach(function (flight) {
       if (!flight.signal_v2) return;
@@ -944,7 +978,7 @@
       });
     }
     state.selectedSignalProvisional = mergeSignalPoints([], provisional);
-    trimSelectedSignalRoute(state.selectedSignalWindowEnd || Date.now() / 1000);
+    trimSelectedSignalRoute(state.selectedSignalWindowEnd || displayNowSeconds());
     setSignalLegendVisible(drawableSelectedSignalPoints().length >= 2);
     if (loadHistory) loadSelectedSignalHistory();
   }
@@ -956,7 +990,7 @@
     var selectionVersion = state.selectedSignalSelectionVersion;
     var since = state.selectedSignalSince;
     if (since == null) {
-      since = (state.selectedSignalWindowEnd || Date.now() / 1000) - SIGNAL_ROUTE_WINDOW_SECONDS - 2;
+      since = (state.selectedSignalWindowEnd || displayNowSeconds()) - SIGNAL_ROUTE_WINDOW_SECONDS - 2;
     }
     state.selectedSignalLoadingIcao24 = icao24;
     Promise.resolve(getSignalHistory(icao24, since))
@@ -980,7 +1014,7 @@
             return Number(point.timestamp) > finalizedThrough;
           });
         }
-        trimSelectedSignalRoute(state.selectedSignalWindowEnd || Date.now() / 1000);
+        trimSelectedSignalRoute(state.selectedSignalWindowEnd || displayNowSeconds());
         updateFlightLayers();
         resolveSelectedSignalFocus(selectionVersion);
       })
@@ -1001,7 +1035,7 @@
   }
 
   function selectedSignalPoints() {
-    var cutoff = (state.selectedSignalWindowEnd || Date.now() / 1000) - SIGNAL_ROUTE_WINDOW_SECONDS;
+    var cutoff = (state.selectedSignalWindowEnd || displayNowSeconds()) - SIGNAL_ROUTE_WINDOW_SECONDS;
     return mergeSignalPoints(state.selectedSignalHistory, state.selectedSignalProvisional).filter(function (point) {
       return Number(point.timestamp) >= cutoff &&
         finiteNumber(point.aircraft_lon) != null && finiteNumber(point.aircraft_lat) != null;
