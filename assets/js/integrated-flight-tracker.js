@@ -353,22 +353,18 @@
       });
     }
     function flightPosition(flight) {
+      // Always the same source (flight.current) whether or not this flight is
+      // selected, so selecting a flight never shifts its rendered icon:
+      // signal_v2.live_current is a separately-modeled, per-second dead-reckoned
+      // prediction (see v2_signal.py's predict_observation) built to drive the
+      // signal-strength curve/details panel between real polls -- it doesn't
+      // line up pixel-for-pixel with the tracker's own observed position feed.
       var current = flight.current;
-      if (flight.icao24 === state.selectedIcao24 && flight.signal_v2 && flight.signal_v2.live_current) {
-        var live = flight.signal_v2.live_current;
-        if (finiteNumber(live.aircraft_lon) != null && finiteNumber(live.aircraft_lat) != null) {
-          return [Number(live.aircraft_lon), Number(live.aircraft_lat),
-            is3D ? Math.max(0, Number(live.aircraft_altitude_m) || 0) : 0];
-        }
-      }
       return [current.longitude, current.latitude, is3D ? Number(current.altitude_m || 0) : 0];
     }
     function flightHeading(flight) {
+      // See flightPosition -- same reasoning, always flight.current.
       var current = flight.current;
-      if (flight.icao24 === state.selectedIcao24 && flight.signal_v2 && flight.signal_v2.live_current &&
-          finiteNumber(flight.signal_v2.live_current.heading_deg) != null) {
-        return Number(flight.signal_v2.live_current.heading_deg);
-      }
       return Number(current.heading_deg || 0);
     }
 
@@ -1747,15 +1743,10 @@
       };
     },
     getPose: function (icao24) {
+      // See flightPosition's comment -- always flight.current, never
+      // signal_v2.live_current, so the Display Mode camera never jumps either.
       var flight = state.flights.find(function (item) { return item.icao24 === icao24; });
       if (!flight || !flight.current) return null;
-      var live = flight.signal_v2 && flight.signal_v2.live_current;
-      if (live && finiteNumber(live.aircraft_lon) != null && finiteNumber(live.aircraft_lat) != null) {
-        return {
-          center: [Number(live.aircraft_lon), Number(live.aircraft_lat)],
-          heading: finiteNumber(live.heading_deg) == null ? Number(flight.current.heading_deg) || 0 : Number(live.heading_deg)
-        };
-      }
       if (finiteNumber(flight.current.longitude) == null || finiteNumber(flight.current.latitude) == null) return null;
       return {
         center: [Number(flight.current.longitude), Number(flight.current.latitude)],
