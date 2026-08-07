@@ -99,7 +99,12 @@ class FlightTrackerTests(unittest.TestCase):
         self.assertEqual(flight["direction"], "departure")
         self.assertEqual(flight["current"]["phase"], "initial_departure")
 
-    def test_confirmed_flight_outside_40_nm_is_future_research(self) -> None:
+    def test_confirmed_flight_outside_40_nm_is_no_longer_shown(self) -> None:
+        # A confirmed flight that has flown beyond the classification radius
+        # is no longer worth full signal processing or display (_worth_tracking)
+        # -- it used to keep showing indefinitely with an "outside_current_rule"
+        # phase, which let departed flights pile up and overload the async
+        # signal worker for the rest of a run.
         points = [
             (0.2, 50, 0, True, 10),
             (1.0, 600, 1000, False, 140),
@@ -114,14 +119,8 @@ class FlightTrackerTests(unittest.TestCase):
                 index * 30,
             )
 
-        flight = self.tracker.snapshot(now=self.base + 120)["flights"][0]
-        current = flight["current"]
-        self.assertEqual(current["phase"], "outside_current_rule")
-        self.assertIsNone(current["frequency_mhz"])
-        self.assertEqual(current["frequency_status"], "Future Research")
-        self.assertEqual(flight["signal_v2"]["current"]["inferred_phase"], "unknown")
-        self.assertIsNone(flight["signal_v2"]["current"]["most_likely_frequency_mhz"])
-        self.assertIsNone(flight["signal_v2"]["current"]["total_loss_db"])
+        flights = self.tracker.snapshot(now=self.base + 120)["flights"]
+        self.assertEqual(flights, [])
 
     def test_async_building_work_does_not_block_tracker_snapshot(self) -> None:
         class BlockingBuildingProvider:
