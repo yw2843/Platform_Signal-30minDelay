@@ -35,13 +35,6 @@ ACTIVE_TIMEOUT_SECONDS = 90
 VERTICAL_TOLERANCE_FPM = 200.0
 RADIAL_TREND_TOLERANCE_NM = 0.05
 OBSERVATIONS_TO_CLASSIFY = 3
-# How long an aircraft may sit continuously in the LGA_GROUND (parked/taxiing)
-# phase before it stops being worth full RF signal processing and display --
-# a stationary aircraft's modeled signal isn't meaningfully changing, and each
-# one otherwise costs the async signal worker a building-obstruction network
-# lookup every poll, which is what let a busy period's worker backlog grow
-# large enough to leave every flight's predicted_timeline empty.
-GROUND_TAXI_TIMEOUT_SECONDS = 3 * 60
 
 TOKEN_URL = (
     "https://auth.opensky-network.org/auth/realms/opensky-network/"
@@ -114,12 +107,6 @@ class AircraftRecord:
     seen_ground_anchor: bool = False
     seen_initial_departure_zone: bool = False
     last_seen: float = 0.0
-    # Timestamp of the first observation in the current unbroken run of
-    # LGA_GROUND (parked/taxiing) classifications; None while airborne or not
-    # yet classified as grounded. Reset the moment the aircraft is no longer
-    # in that condition, so a genuine long taxi that keeps moving doesn't
-    # accidentally count as motionless.
-    ground_taxi_since: float | None = None
 
 
 @dataclass(frozen=True)
@@ -259,37 +246,12 @@ class FlightTracker:
         record.last_seen = received_at
         self._trim_history(record, received_at)
         self._update_classification(record, observation)
-        if not self._worth_tracking(record, distance_nm, observed_at):
-            return None
         return SignalJob(
             icao24=record.icao24,
             observation=dict(observation),
             direction=record.direction,
             status=record.status,
         )
-
-    @staticmethod
-    def _worth_tracking(record: AircraftRecord, distance_nm: float, observed_at: float) -> bool:
-        """Whether this aircraft still merits full signal processing and
-        display. Used both to decide whether to enqueue a SignalJob (as of
-        the current observation) and, in snapshot(), whether to still expose
-        the flight at all (as of the snapshot's own reference time). Excludes
-        aircraft that have left the classification radius -- confirmed
-        flights otherwise keep getting processed and shown for the rest of
-        the run even after departing the area entirely -- and aircraft that
-        have been sitting continuously in the LGA_GROUND (parked/taxiing)
-        phase for GROUND_TAXI_TIMEOUT_SECONDS, whose modeled signal isn't
-        meaningfully changing. Both were identified as the main contributors
-        to the async worker falling behind during a busy period, which left
-        every flight's predicted_timeline empty."""
-        if distance_nm > CLASSIFICATION_RADIUS_NM:
-            return False
-        if (
-            record.ground_taxi_since is not None
-            and observed_at - record.ground_taxi_since > GROUND_TAXI_TIMEOUT_SECONDS
-        ):
-            return False
-        return True
 
     def _enqueue_signal_jobs(self, jobs: list[SignalJob], active_ids: set[str]) -> None:
         with self._signal_condition:
@@ -390,13 +352,8 @@ class FlightTracker:
             and speed_kt is not None
             and speed_kt <= 50
         )
-        grounded = distance_nm <= 1.5 and (current["on_ground"] or low_and_slow)
-        if grounded:
+        if distance_nm <= 1.5 and (current["on_ground"] or low_and_slow):
             record.seen_ground_anchor = True
-            if record.ground_taxi_since is None:
-                record.ground_taxi_since = current["timestamp"]
-        else:
-            record.ground_taxi_since = None
 
         arrival_signal = bool(
             inside_scope
@@ -585,8 +542,6 @@ class FlightTracker:
                 if record.status not in {"probable", "confirmed"} or not record.history:
                     continue
                 current = record.history[-1]
-                if not self._worth_tracking(record, current["distance_nm"], now):
-                    continue
                 phase = self._phase_for(record, current)
                 flights.append(
                     {
